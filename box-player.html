@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Box Player</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; cursor: none; }
+  video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; display: none; }
+  #closed { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #fff; font: 700 10vw/1 system-ui, sans-serif; letter-spacing: .05em; text-align: center; }
+  #panel { position: fixed; left: 16px; top: 16px; color: #ddd; font: 14px/1.5 monospace;
+           background: rgba(20,20,20,.9); padding: 12px 16px; cursor: default; max-width: 90vw; }
+  #panel.hidden { display: none; }
+  button { font: inherit; padding: 6px 12px; margin-top: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<video id="v" playsinline></video>
+<audio id="a"></audio>
+<div id="closed"></div>
+<div id="panel">
+  <div><b>Box Player</b> — S hides/shows this panel · O / C test open / close</div>
+  <div id="status">starting…</div>
+  <button id="connect">Connect sensor (once)</button>
+</div>
+<script src="clips.js"></script>
+<script>
+const v = document.getElementById('v');
+const a = document.getElementById('a');
+const panel = document.getElementById('panel');
+const statusEl = document.getElementById('status');
+const clips = window.CLIPS || [];
+const closedEl = document.getElementById('closed');
+closedEl.textContent = window.CLOSED_TEXT ?? 'OPEN IT';   // empty text = plain black
+let state = 'CLOSED', last = -1, port = null, info = { port: 'none', cm: '-', clip: '-' };
+
+function show() {
+  statusEl.textContent = `sensor: ${info.port} · lid: ${state} · distance: ${info.cm} cm · clip: ${info.clip} · ${clips.length} clips`;
+}
+
+function pickRandom() {
+  if (clips.length < 2) return 0;
+  let i;
+  do { i = Math.floor(Math.random() * clips.length); } while (i === last);  // never the same twice in a row
+  return i;
+}
+
+function openLid() {
+  if (!clips.length) { info.clip = 'no clips in clips.js'; return; }
+  const i = pickRandom(); last = i;
+  const c = clips[i];
+  info.clip = c.video + (c.track ? ' + ' + c.track : '');
+  v.src = c.video; v.muted = !!c.track; v.currentTime = 0;
+  if (c.track) { a.src = c.track; a.currentTime = 0; }
+  else { a.removeAttribute('src'); a.load(); }
+  v.style.display = 'block';
+  closedEl.style.display = 'none';
+  v.play().catch(e => info.clip = 'play blocked: ' + e.message);
+  if (c.track) a.play().catch(e => info.clip = 'sound blocked: ' + e.message);
+}
+
+function closeLid() {
+  v.pause(); a.pause();
+  v.style.display = 'none';           // black screen with the closed text
+  closedEl.style.display = 'flex';
+  v.removeAttribute('src'); v.load();
+  a.removeAttribute('src'); a.load();
+  info.clip = '-';
+}
+
+function setState(s) {
+  if (s === state) return;
+  state = s;
+  s === 'OPEN' ? openLid() : closeLid();
+  show();
+}
+
+// keep the track and the video together (fix drift over 0.15 s)
+setInterval(() => {
+  if (state === 'OPEN' && a.src && !v.paused && Math.abs(v.currentTime - a.currentTime) > 0.15)
+    v.currentTime = a.currentTime;
+}, 1000);
+// when the clip ends with the lid still open, the screen goes black
+v.addEventListener('ended', () => { v.style.display = 'none'; });
+
+async function readPort(p) {
+  port = p;
+  try {
+    await p.open({ baudRate: 9600 });
+    info.port = 'connected'; show();
+    const reader = p.readable.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let n;
+      while ((n = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, n).trim(); buf = buf.slice(n + 1);
+        if (line === 'OPEN' || line === 'CLOSED') setState(line);
+        else if (line.startsWith('cm ')) { info.cm = line.slice(3); show(); }
+      }
+    }
+  } catch (e) { info.port = 'error: ' + e.message; }
+  info.port = 'lost — replug USB'; port = null; show();
+}
+
+async function autoConnect() {
+  if (!('serial' in navigator)) { info.port = 'this browser has no Web Serial — use Chrome or Edge'; show(); return; }
+  const ports = await navigator.serial.getPorts();   // ports allowed before need no click
+  if (ports.length && !port) readPort(ports[0]);
+}
+
+document.getElementById('connect').onclick = async () => {
+  try { readPort(await navigator.serial.requestPort()); } catch (e) { info.port = 'not chosen'; show(); }
+};
+if ('serial' in navigator) navigator.serial.addEventListener('connect', autoConnect);
+
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === 's') panel.classList.toggle('hidden');
+  if (k === 'o') setState('OPEN');
+  if (k === 'c') setState('CLOSED');
+});
+
+show();
+autoConnect().then(() => setTimeout(() => { if (port) panel.classList.add('hidden'); }, 5000));
+</script>
+</body>
+</html>
